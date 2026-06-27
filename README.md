@@ -118,21 +118,18 @@ git push -u origin main
 
 3. **Share the repository link** with your teammate
 
-### What your teammate needs to start working
-
-1. Node.js 18+ installed
-2. Git installed
-3. Supabase account access
-4. A copy of the project requirements (KARUMART412 PDF)
-5. API keys for Supabase (shared separately, not in git)
-
-### What you need to ask from your teammate
-
-1. Which specific features/modules will they build?
-2. What Supabase credentials do they have?
-3. Their Git username to add as collaborator
-4. Preferred communication channel (WhatsApp/Teams/Discord)
-5. Timeline and milestone deadlines
+KarMart Admin - Setup Instructions
+1. Clone the repo:
+git clone https://github.com/suraiyaafrozmomo09-code/karumart-admin.git
+cd karumart-admin
+2. Install dependencies:
+npm install
+3. Set up environment variables:
+- Copy .env.example to .env
+- Fill in your Supabase project URL and anon key (from your Supabase project settings → API)
+4. Run the app:
+npm run dev
+You should now be able to access the admin panel. Let me know if you hit any issues.
 
 ## Project Structure
 
