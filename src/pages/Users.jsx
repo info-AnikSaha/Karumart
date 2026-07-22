@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Search, Plus, X, Edit2, Trash2, Shield, UserCheck, UserX, Filter, ChevronDown } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 
 export default function Users() {
+  const navigate = useNavigate()
   const [users, setUsers] = useState([])
   const [search, setSearch] = useState('')
   const [showModal, setShowModal] = useState(false)
@@ -198,7 +200,7 @@ export default function Users() {
               </thead>
               <tbody>
                 {filteredUsers.map((user, index) => (
-                  <tr key={user.id} className="border-b border-dark-50 hover:bg-dark-50/30 transition-colors">
+                  <tr key={user.id} onClick={() => navigate(`/users/${user.id}`)} className="border-b border-dark-50 hover:bg-dark-50/30 transition-colors cursor-pointer">
                     <td className="py-4 px-6">
                       <div className="flex items-center gap-3">
                         <div className="w-10 h-10 bg-gradient-to-br from-primary-400 to-secondary-400 rounded-full flex items-center justify-center text-white font-semibold">
@@ -228,13 +230,13 @@ export default function Users() {
                     <td className="py-4 px-6">
                       <div className="flex items-center justify-end gap-2">
                         <button
-                          onClick={() => handleEdit(user)}
+                          onClick={(e) => { e.stopPropagation(); handleEdit(user) }}
                           className="p-2 rounded-lg hover:bg-dark-100 text-dark-400 hover:text-primary-600 transition-colors"
                         >
                           <Edit2 className="w-4 h-4" />
                         </button>
                         <button
-                          onClick={() => handleDelete(user.id)}
+                          onClick={(e) => { e.stopPropagation(); handleDelete(user.id) }}
                           className="p-2 rounded-lg hover:bg-red-50 text-dark-400 hover:text-red-600 transition-colors"
                         >
                           <Trash2 className="w-4 h-4" />

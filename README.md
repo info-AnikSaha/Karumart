@@ -74,18 +74,41 @@ CREATE TABLE categories (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Orders table
+-- Orders, order tracking & automatic order-number generation
+-- The full, authoritative schema lives in:
+--   supabase/migrations/0001_orders_tracking.sql
+-- Run that file in the Supabase SQL editor. It creates the order_status enum,
+-- the orders table (uuid id, auto-generated order_number KM-YYMMDD-NNNN via a
+-- BEFORE INSERT trigger), the order_status_history audit trail, Realtime
+-- publication, and Row Level Security. Summary of the orders table:
 CREATE TABLE orders (
-  id SERIAL PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_number TEXT UNIQUE,            -- auto: KM-YYMMDD-NNNN (DB trigger)
   customer_id UUID REFERENCES profiles(id),
-  product_id INTEGER REFERENCES products(id),
-  quantity INTEGER NOT NULL DEFAULT 1,
-  amount DECIMAL(10,2) NOT NULL,
-  status TEXT CHECK (status IN ('processing', 'shipped', 'completed', 'cancelled')) DEFAULT 'processing',
-  address TEXT NOT NULL,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  customer_name TEXT, customer_email TEXT, customer_phone TEXT,
+  shipping_address TEXT,
+  items JSONB NOT NULL DEFAULT '[]',   -- [{ product_id, name, quantity, price }]
+  subtotal DECIMAL(10,2), shipping_fee DECIMAL(10,2), total_amount DECIMAL(10,2),
+  status order_status DEFAULT 'pending',
+  payment_method TEXT, payment_status TEXT DEFAULT 'unpaid',
+  notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
+
+### Orders, tracking & profile dashboards
+
+- **Automatic order IDs** — every order gets a unique, human-readable
+  `KM-YYMMDD-NNNN` number (daily-reset sequence) assigned race-safely by a
+  Postgres trigger. See `supabase/migrations/0001_orders_tracking.sql`.
+- **Real-time tracking** — order status lifecycle
+  (`pending → confirmed → processing → shipped → out_for_delivery → delivered`,
+  plus `cancelled`/`returned`) with a full audit trail in `order_status_history`,
+  pushed live to the UI via Supabase Realtime (`src/hooks/useRealtimeOrders.js`,
+  `src/hooks/useOrderTracking.js`).
+- **User profile dashboard** — admin user-detail page at `/users/:id`
+  (`src/pages/UserProfile.jsx`); the customer-facing dashboard design is in
+  `docs/user-profile-dashboard-architecture.md`.
 
 ## Tech Stack
 
