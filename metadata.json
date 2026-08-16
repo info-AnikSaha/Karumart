@@ -1,6 +1,5 @@
 {
   "name": "Karumart",
-  "description": "Karumart (কারুমার্ট) is a professional e-commerce marketplace for remote rural artisans and home-based creators in Bangladesh, featuring high-quality handcrafted goods, organic products, and cottage industry treasures.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "description": "A full-stack e-commerce platform in Bangla (Karumart), connecting farmers and creators directly with consumers.",
+  "requestFramePermissions": []
 }
