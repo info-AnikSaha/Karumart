@@ -1,0 +1,971 @@
+import React, { useEffect, useState } from 'react';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/AuthContext';
+import { Order, Product, Wishlist } from '@/types';
+import { ProductCard } from '@/components/ProductCard';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { useLanguage } from '@/contexts/LanguageContext';
+import { 
+  Star, MessageSquare, RotateCcw, XCircle, MapPin, Truck, Package, 
+  ShoppingBag, CheckCircle, ThumbsUp, Clock, User, Settings, 
+  CreditCard, Heart, Eye, Ticket, Wallet, ChevronRight, LogOut,
+  Mail, Phone, ShieldCheck, Bell, HelpCircle
+} from 'lucide-react';
+import { toast } from 'sonner';
+import { Link } from 'react-router-dom';
+import { InvoiceModal } from '@/components/InvoiceModal';
+import { ComplaintModal } from '@/components/ComplaintModal';
+import { RatingModal } from '@/components/RatingModal';
+
+type TabType = 'overview' | 'orders' | 'wishlist' | 'address' | 'settings';
+
+export default function ConsumerDashboard() {
+  const { user, profile, signOut, refreshProfile } = useAuth();
+  const { t } = useLanguage();
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [wishlist, setWishlist] = useState<Wishlist[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<TabType>('overview');
+  const [orderFilter, setOrderFilter] = useState<'all' | 'pending' | 'confirmed' | 'shipping' | 'delivered' | 'cancelled'>('all');
+  
+  // Review State
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<{id: string, name: string} | null>(null);
+  const [rating, setRating] = useState(5);
+  const [comment, setComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  
+  // Tracking State
+  const [isTrackingOpen, setIsTrackingOpen] = useState(false);
+  const [trackingOrder, setTrackingOrder] = useState<Order | null>(null);
+
+  // Settings State
+  const [newEmail, setNewEmail] = useState('');
+  const [updatingEmail, setUpdatingEmail] = useState(false);
+  const [newAddress, setNewAddress] = useState(profile?.address || '');
+  const [newPhone, setNewPhone] = useState(profile?.phone || '');
+  const [updatingProfile, setUpdatingProfile] = useState(false);
+
+  useEffect(() => {
+    if (profile) {
+      setNewAddress(profile.address || '');
+      setNewPhone(profile.phone || '');
+    }
+  }, [profile]);
+
+  useEffect(() => {
+    if (user) {
+      fetchOrders();
+      fetchProducts();
+      fetchWishlist();
+
+      // Real-time listener for order status changes
+      const ordersSubscription = supabase
+        .channel('order-status-changes')
+        .on(
+          'postgres_changes',
+          {
+            event: 'UPDATE',
+            schema: 'public',
+            table: 'orders',
+            filter: `consumer_id=eq.${user.id}`,
+          },
+          async (payload) => {
+            const updatedOrder = payload.new as Order;
+            const oldOrder = payload.old as Order;
+            
+            if (updatedOrder.status !== oldOrder.status) {
+              // Fetch current active orders count
+              const { count } = await supabase
+                .from('orders')
+                .select('*', { count: 'exact', head: true })
+                .eq('consumer_id', user.id)
+                .in('status', ['pending', 'confirmed', 'picked_up', 'on_the_way', 'return_requested', 'return_picked_up']);
+
+              const statusLabels: Record<string, string> = {
+                pending: t.pending,
+                confirmed: t.confirmed,
+                picked_up: t.pickedUp,
+                on_the_way: t.onTheWay,
+                delivered: t.delivered,
+                cancelled: t.cancelled,
+                return_requested: t.returnRequested,
+                return_picked_up: t.returnPickedUp,
+                returned: t.returned,
+              };
+
+              toast.info(`${t.orderId} #${updatedOrder.id.slice(0, 8)} - ${t.status}: ${statusLabels[updatedOrder.status] || updatedOrder.status}`, {
+                description: t.activeOrdersCount.replace('{count}', (count || 0).toString()),
+                icon: <Bell className="w-4 h-4 text-green-600" />,
+                duration: 5000,
+              });
+              
+              fetchOrders(); // Refresh orders list
+            }
+          }
+        )
+        .subscribe();
+
+      return () => {
+        supabase.removeChannel(ordersSubscription);
+      };
+    }
+  }, [user]);
+
+  const fetchWishlist = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('wishlist')
+        .select('*, product:products(*, farmer:profiles(*))')
+        .eq('user_id', user?.id)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setWishlist(data || []);
+    } catch (error) {
+      console.error('Error fetching wishlist:', error);
+    }
+  };
+
+  const fetchOrders = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('orders')
+        .select('*, items:order_items(*, product:products(*, farmer:profiles(*)))')
+        .eq('consumer_id', user?.id)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setOrders(data || []);
+    } catch (error) {
+      console.error('Error fetching orders:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchProducts = async () => {
+    try {
+      // Get search history from localStorage
+      let searchTerms: string[] = [];
+      try {
+        const history = localStorage.getItem('searchHistory');
+        if (history) searchTerms = JSON.parse(history);
+      } catch (e) {
+        console.error('Error reading search history:', e);
+      }
+
+      // Fetch products that are approved, in stock, and from open shops
+      const { data, error } = await supabase
+        .from('products')
+        .select('*, farmer:profiles!inner(*)')
+        .eq('is_approved', true)
+        .gt('quantity', 0)
+        .eq('farmer.shop_status', 'open')
+        .limit(50);
+
+      if (error) throw error;
+      
+      let recommended = data || [];
+      
+      // If we have search history, prioritize matched items
+      if (searchTerms.length > 0) {
+        recommended = [...recommended].sort((a, b) => {
+          const aScore = searchTerms.reduce((acc, term) => {
+            const t = term.toLowerCase();
+            const nameMatch = a.name.toLowerCase().includes(t) ? 3 : 0;
+            const catMatch = a.category.toLowerCase().includes(t) ? 2 : 0;
+            return acc + nameMatch + catMatch;
+          }, 0);
+          
+          const bScore = searchTerms.reduce((acc, term) => {
+            const t = term.toLowerCase();
+            const nameMatch = b.name.toLowerCase().includes(t) ? 3 : 0;
+            const catMatch = b.category.toLowerCase().includes(t) ? 2 : 0;
+            return acc + nameMatch + catMatch;
+          }, 0);
+          
+          return bScore - aScore;
+        });
+      }
+
+      setProducts(recommended.slice(0, 8));
+    } catch (error) {
+      console.error('Error fetching products:', error);
+    }
+  };
+
+  const handleUpdateEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newEmail) return;
+    try {
+      setUpdatingEmail(true);
+      const { error } = await supabase.auth.updateUser({ email: newEmail });
+      if (error) throw error;
+      toast.success(t.verified);
+      setNewEmail('');
+    } catch (error: any) {
+      toast.error(error.message || t.email);
+    } finally {
+      setUpdatingEmail(false);
+    }
+  };
+
+  const handleUpdateProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      setUpdatingProfile(true);
+      const { error } = await supabase
+        .from('profiles')
+        .update({ address: newAddress, phone: newPhone })
+        .eq('id', user?.id);
+      if (error) throw error;
+      await refreshProfile();
+      toast.success(t.success);
+    } catch (error: any) {
+      toast.error(error.message || t.address);
+    } finally {
+      setUpdatingProfile(false);
+    }
+  };
+
+  const handleSubmitReview = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedProduct || !user) return;
+
+    try {
+      setSubmitting(true);
+      const { error } = await supabase.from('reviews').insert({
+        product_id: selectedProduct.id,
+        consumer_id: user.id,
+        rating,
+        comment,
+      });
+
+      if (error) throw error;
+      toast.success(t.success);
+      setIsReviewOpen(false);
+      setComment('');
+      setRating(5);
+    } catch (error: any) {
+      console.error('Review Submission Error:', error);
+      toast.error(error.message || t.giveReview);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleReturnRequest = async (orderId: string) => {
+    try {
+      const { error: orderError } = await supabase
+        .from('orders')
+        .update({ status: 'return_requested' })
+        .eq('id', orderId);
+
+      if (orderError) throw orderError;
+      toast.success(t.returnRequested);
+      fetchOrders();
+    } catch (error: any) {
+      toast.error(error.message || t.returnOrder);
+    }
+  };
+
+  const handleCancelOrder = async (orderId: string, items: any[]) => {
+    try {
+      const { error: orderError } = await supabase
+        .from('orders')
+        .update({ status: 'cancelled' })
+        .eq('id', orderId);
+
+      if (orderError) throw orderError;
+
+      for (const item of items) {
+        const { data: p } = await supabase
+          .from('products')
+          .select('quantity')
+          .eq('id', item.product_id)
+          .single();
+        
+        if (p) {
+          await supabase
+            .from('products')
+            .update({ quantity: p.quantity + item.quantity })
+            .eq('id', item.product_id);
+        }
+      }
+
+      toast.success(t.cancelled);
+      fetchOrders();
+    } catch (error: any) {
+      toast.error(error.message || t.cancelOrder);
+    }
+  };
+
+  const getStatusBadge = (status: string) => {
+    const colors: Record<string, string> = {
+      pending: 'bg-amber-100 text-amber-700',
+      picked_up: 'bg-blue-100 text-blue-700',
+      on_the_way: 'bg-indigo-100 text-indigo-700',
+      delivered: 'bg-green-100 text-green-700',
+      cancelled: 'bg-red-100 text-red-700',
+      return_requested: 'bg-orange-100 text-orange-700',
+      return_picked_up: 'bg-purple-100 text-purple-700',
+      returned: 'bg-gray-100 text-gray-700',
+    };
+    
+    const labels: Record<string, string> = {
+      pending: t.pending,
+      picked_up: t.pickedUp,
+      on_the_way: t.onTheWay,
+      delivered: t.delivered,
+      cancelled: t.cancelled,
+      return_requested: t.returnRequested,
+      return_picked_up: t.returnPickedUp,
+      returned: t.returned,
+    };
+
+    return (
+      <Badge className={colors[status] || 'bg-gray-100 text-gray-700'}>
+        {labels[status] || status}
+      </Badge>
+    );
+  };
+
+  const getTrackingSteps = (status: string) => {
+    const isReturnedFlow = ['return_requested', 'return_picked_up', 'returned'].includes(status);
+    const steps = [
+      { id: 'placed', label: t.placeOrder, icon: <ShoppingBag className="w-4 h-4" />, active: true },
+      { id: 'confirmed', label: t.confirmed, icon: <Package className="w-4 h-4" />, active: ['confirmed', 'picked_up', 'on_the_way', 'delivered', 'return_requested', 'return_picked_up', 'returned'].includes(status) },
+      { id: 'picked_up', label: t.pickedUp, icon: <CheckCircle className="w-4 h-4" />, active: ['picked_up', 'on_the_way', 'delivered', 'return_requested', 'return_picked_up', 'returned'].includes(status) },
+      { id: 'on_the_way', label: t.onTheWay, icon: <Truck className="w-4 h-4" />, active: ['on_the_way', 'delivered', 'return_requested', 'return_picked_up', 'returned'].includes(status) },
+      { id: 'delivered', label: t.delivered, icon: <ThumbsUp className="w-4 h-4" />, active: ['delivered', 'return_requested', 'return_picked_up', 'returned'].includes(status) },
+    ];
+
+    if (isReturnedFlow) {
+      steps.push(
+        { id: 'return_requested', label: t.returnRequested, icon: <RotateCcw className="w-4 h-4" />, active: true },
+        { id: 'return_picked_up', label: t.returnPickedUp, icon: <Package className="w-4 h-4" />, active: ['return_picked_up', 'returned'].includes(status) },
+        { id: 'returned', label: t.returned, icon: <CheckCircle className="w-4 h-4" />, active: status === 'returned' }
+      );
+    }
+
+    if (status === 'cancelled') {
+      steps.push({ id: 'cancelled', label: t.cancelled, icon: <XCircle className="w-4 h-4" />, active: true });
+    }
+
+    return steps;
+  };
+
+  const SidebarItem = ({ id, label, icon: Icon }: { id: TabType, label: string, icon: any }) => (
+    <button
+      onClick={() => setActiveTab(id)}
+      className={`w-full flex items-center justify-between px-4 py-3 text-sm transition-all ${
+        activeTab === id 
+          ? 'bg-green-50 text-green-700 border-r-4 border-green-600 font-bold' 
+          : 'text-gray-600 hover:bg-gray-50'
+      }`}
+    >
+      <div className="flex items-center gap-3">
+        <Icon className={`w-4 h-4 ${activeTab === id ? 'text-green-600' : 'text-gray-400'}`} />
+        {label}
+      </div>
+      {id === 'wishlist' && wishlist.length > 0 && (
+        <Badge variant="secondary" className="h-5 px-1.5 text-[10px] bg-red-50 text-red-600 border-red-100">
+          {wishlist.length}
+        </Badge>
+      )}
+    </button>
+  );
+
+  const OrderStatusCard = ({ icon: Icon, label, count, status }: { icon: any, label: string, count: number, status: string }) => (
+    <div 
+      className="flex flex-col items-center gap-2 p-4 bg-white rounded-xl border border-gray-100 hover:shadow-md transition-all cursor-pointer group" 
+      onClick={() => {
+        setOrderFilter(status as any);
+        setActiveTab('orders');
+      }}
+    >
+      <div className="w-12 h-12 rounded-full bg-orange-50 flex items-center justify-center group-hover:scale-110 transition-transform">
+        <Icon className="w-6 h-6 text-orange-500" />
+      </div>
+      <span className="text-xs font-medium text-gray-600">{label}</span>
+      {count > 0 && (
+        <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-[10px] flex items-center justify-center rounded-full border-2 border-white">
+          {count}
+        </span>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 py-8">
+      <div className="flex flex-col md:flex-row gap-8">
+        {/* Sidebar */}
+        <div className="w-full md:w-64 shrink-0">
+          <Card className="border-none shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-gray-50">
+              <h3 className="font-bold text-gray-800">{t.account}</h3>
+            </div>
+            <div className="py-2">
+              <SidebarItem id="overview" label={t.dashboard} icon={User} />
+              <SidebarItem id="orders" label={t.myOrders} icon={ShoppingBag} />
+              <SidebarItem id="wishlist" label={t.wishlist} icon={Heart} />
+              <SidebarItem id="address" label={t.address} icon={MapPin} />
+              <SidebarItem id="settings" label={t.settings} icon={Settings} />
+              
+              <div className="mt-4 pt-4 border-t border-gray-50">
+                <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-600 hover:bg-gray-50">
+                  <CreditCard className="w-4 h-4 text-gray-400" /> {t.paymentMethods}
+                </button>
+                <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-600 hover:bg-gray-50">
+                  <RotateCcw className="w-4 h-4 text-gray-400" /> {t.returnRefund}
+                </button>
+                <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-600 hover:bg-gray-50">
+                  <MessageSquare className="w-4 h-4 text-gray-400" /> {t.feedback}
+                </button>
+                <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-600 hover:bg-gray-50">
+                  <HelpCircle className="w-4 h-4 text-gray-400" /> {t.helpCenter}
+                </button>
+              </div>
+
+              <div className="mt-8 p-4">
+                <Button 
+                  variant="outline" 
+                  className="w-full border-red-100 text-red-600 hover:bg-red-50 hover:text-red-700"
+                  onClick={() => signOut()}
+                >
+                  <LogOut className="w-4 h-4 mr-2" /> {t.logout}
+                </Button>
+              </div>
+            </div>
+          </Card>
+        </div>
+
+        {/* Main Content */}
+        <div className="flex-1 space-y-6">
+          {activeTab === 'overview' && (
+            <>
+              {/* Profile Header */}
+              <Card className="border-none shadow-sm bg-white overflow-hidden">
+                <CardContent className="p-6">
+                  <div className="flex flex-col md:flex-row items-center gap-6">
+                    <div className="relative">
+                      <div className="w-20 h-20 rounded-full bg-green-100 flex items-center justify-center border-4 border-white shadow-sm overflow-hidden">
+                        {profile?.avatar_url ? (
+                          <img src={profile.avatar_url} alt={profile.full_name} className="w-full h-full object-cover" />
+                        ) : (
+                          <User className="w-10 h-10 text-green-600" />
+                        )}
+                      </div>
+                      <button className="absolute bottom-0 right-0 w-6 h-6 bg-white rounded-full shadow-sm flex items-center justify-center border border-gray-100">
+                        <Settings className="w-3 h-3 text-gray-400" />
+                      </button>
+                    </div>
+                    <div className="text-center md:text-left flex-1">
+                      <h2 className="text-2xl font-bold text-gray-800">{profile?.full_name || t.user}</h2>
+                      <p className="text-sm text-gray-500">{user?.email}</p>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 w-full md:w-auto">
+                      <div className="flex flex-col items-center p-3 bg-gray-50 rounded-xl cursor-pointer hover:bg-red-50 transition-colors" onClick={() => setActiveTab('wishlist')}>
+                        <Heart className="w-5 h-5 text-red-400 mb-1" />
+                        <span className="text-xs font-bold">{wishlist.length}</span>
+                        <span className="text-[10px] text-gray-500">{t.wishlist}</span>
+                      </div>
+                      <div className="flex flex-col items-center p-3 bg-gray-50 rounded-xl">
+                        <Eye className="w-5 h-5 text-blue-400 mb-1" />
+                        <span className="text-xs font-bold">০</span>
+                        <span className="text-[10px] text-gray-500">{t.viewed}</span>
+                      </div>
+                      <div className="flex flex-col items-center p-3 bg-gray-50 rounded-xl">
+                        <Ticket className="w-5 h-5 text-orange-400 mb-1" />
+                        <span className="text-xs font-bold">০</span>
+                        <span className="text-[10px] text-gray-500">{t.coupons}</span>
+                      </div>
+                      <div className="flex flex-col items-center p-3 bg-gray-50 rounded-xl">
+                        <Wallet className="w-5 h-5 text-green-400 mb-1" />
+                        <span className="text-xs font-bold">০</span>
+                        <span className="text-[10px] text-gray-500">{t.credits}</span>
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Order Status */}
+              <Card className="border-none shadow-sm bg-white">
+                <CardHeader className="pb-2 flex flex-row items-center justify-between">
+                  <CardTitle className="text-base font-bold">{t.myOrders}</CardTitle>
+                  <button onClick={() => setActiveTab('orders')} className="text-xs text-gray-400 hover:text-green-600 flex items-center gap-1">
+                    {t.viewAll} <ChevronRight className="w-3 h-3" />
+                  </button>
+                </CardHeader>
+                <CardContent className="p-6">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <OrderStatusCard 
+                      icon={Clock} 
+                      label={t.pending} 
+                      count={orders.filter(o => o.status === 'pending').length} 
+                      status="pending"
+                    />
+                    <OrderStatusCard 
+                      icon={Package} 
+                      label={t.confirmed} 
+                      count={orders.filter(o => o.status === 'confirmed').length} 
+                      status="confirmed"
+                    />
+                    <OrderStatusCard 
+                      icon={Truck} 
+                      label={t.shipping} 
+                      count={orders.filter(o => ['picked_up', 'on_the_way'].includes(o.status)).length} 
+                      status="shipping"
+                    />
+                    <OrderStatusCard 
+                      icon={CheckCircle} 
+                      label={t.giveReview} 
+                      count={orders.filter(o => o.status === 'delivered').length} 
+                      status="delivered"
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* More to Love */}
+              <div className="space-y-4">
+                <h3 className="text-lg font-bold text-gray-800">{t.recommendedForYou}</h3>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {products.map(product => (
+                    <ProductCard key={product.id} product={product} />
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'orders' && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-bold text-gray-800">{t.myOrders}</h2>
+                <div className="flex flex-wrap gap-2">
+                  <Badge 
+                    variant={orderFilter === 'all' ? 'default' : 'outline'} 
+                    className="cursor-pointer hover:bg-green-50"
+                    onClick={() => setOrderFilter('all')}
+                  >
+                    {t.all}
+                  </Badge>
+                  <Badge 
+                    variant={orderFilter === 'pending' ? 'default' : 'outline'} 
+                    className="cursor-pointer hover:bg-green-50"
+                    onClick={() => setOrderFilter('pending')}
+                  >
+                    {t.pending}
+                  </Badge>
+                  <Badge 
+                    variant={orderFilter === 'confirmed' ? 'default' : 'outline'} 
+                    className="cursor-pointer hover:bg-green-50"
+                    onClick={() => setOrderFilter('confirmed')}
+                  >
+                    {t.confirmed}
+                  </Badge>
+                  <Badge 
+                    variant={orderFilter === 'shipping' ? 'default' : 'outline'} 
+                    className="cursor-pointer hover:bg-green-50"
+                    onClick={() => setOrderFilter('shipping')}
+                  >
+                    {t.shipping}
+                  </Badge>
+                  <Badge 
+                    variant={orderFilter === 'delivered' ? 'default' : 'outline'} 
+                    className="cursor-pointer hover:bg-green-50"
+                    onClick={() => setOrderFilter('delivered')}
+                  >
+                    {t.success}
+                  </Badge>
+                  <Badge 
+                    variant={orderFilter === 'cancelled' ? 'default' : 'outline'} 
+                    className="cursor-pointer hover:bg-green-50"
+                    onClick={() => setOrderFilter('cancelled')}
+                  >
+                    {t.cancelled}
+                  </Badge>
+                </div>
+              </div>
+
+              {loading ? (
+                <div className="text-center py-10">{t.pending}...</div>
+              ) : orders.filter(o => {
+                if (orderFilter === 'all') return true;
+                if (orderFilter === 'shipping') return ['picked_up', 'on_the_way'].includes(o.status);
+                return o.status === orderFilter;
+              }).length > 0 ? (
+                <div className="grid gap-4">
+                  {orders
+                    .filter(o => {
+                      if (orderFilter === 'all') return true;
+                      if (orderFilter === 'shipping') return ['picked_up', 'on_the_way'].includes(o.status);
+                      return o.status === orderFilter;
+                    })
+                    .map((order) => (
+                    <Card key={order.id} className="border-none shadow-sm">
+                      <CardHeader className="py-4 border-b border-gray-50">
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                          <div>
+                            <CardTitle className="text-sm text-gray-500">{t.orderId}: #{order.id.slice(0, 8)}</CardTitle>
+                            <p className="text-xs text-gray-400">{new Date(order.created_at).toLocaleDateString('bn-BD')}</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Button 
+                              variant="outline" 
+                              size="sm" 
+                              className="h-7 text-[10px] border-green-200 text-green-600 hover:bg-green-50"
+                              onClick={() => {
+                                setTrackingOrder(order);
+                                setIsTrackingOpen(true);
+                              }}
+                            >
+                              <Truck className="w-3 h-3 mr-1" /> {t.tracking}
+                            </Button>
+                            <InvoiceModal order={order} />
+                            {order.status === 'delivered' && (
+                              <>
+                                <ComplaintModal order={order} />
+                                <RatingModal order={order} onSuccess={fetchOrders} />
+                              </>
+                            )}
+                            {getStatusBadge(order.status)}
+                          </div>
+                        </div>
+                      </CardHeader>
+                      <CardContent className="pt-4">
+                        <div className="space-y-3">
+                          {order.items?.map((item) => {
+                            const productId = item.product_id || item.product?.id;
+                            return (
+                              <div key={item.id} className="flex items-center justify-between text-sm bg-gray-50 p-3 rounded-xl hover:bg-gray-100/70 transition-colors">
+                                <div className="flex gap-3 items-center">
+                                  {productId ? (
+                                    <Link 
+                                      to={`/product/${productId}`} 
+                                      className="w-12 h-12 rounded-lg bg-white border border-gray-200 overflow-hidden shrink-0 block hover:opacity-85 hover:scale-105 transition-all shadow-xs"
+                                    >
+                                      <img 
+                                        src={item.product?.image_url || `https://picsum.photos/seed/${item.product?.name || 'item'}/200/200`} 
+                                        alt={item.product?.name} 
+                                        className="w-full h-full object-cover" 
+                                        referrerPolicy="no-referrer"
+                                      />
+                                    </Link>
+                                  ) : (
+                                    <div className="w-12 h-12 rounded-lg bg-white border border-gray-100 overflow-hidden shrink-0">
+                                      <img src={item.product?.image_url} alt={item.product?.name} className="w-full h-full object-cover" />
+                                    </div>
+                                  )}
+                                  <div className="flex flex-col">
+                                    {productId ? (
+                                      <Link 
+                                        to={`/product/${productId}`} 
+                                        className="font-semibold text-gray-900 hover:text-green-600 transition-colors line-clamp-1"
+                                      >
+                                        {item.product?.name}
+                                      </Link>
+                                    ) : (
+                                      <span className="font-medium text-gray-900">{item.product?.name}</span>
+                                    )}
+                                    <span className="text-[10px] text-gray-500">
+                                      {t.quantity}: {item.quantity} | {t.seller}: {item.product?.farmer?.shop_name || item.product?.farmer?.full_name || t.farmer}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-4">
+                                  <span className="font-bold text-gray-700">৳{item.price_at_time * item.quantity}</span>
+                                  {order.status === 'delivered' && (
+                                    <Button 
+                                      variant="ghost" 
+                                      size="sm" 
+                                      className="h-8 text-[10px] text-amber-600 hover:bg-amber-50"
+                                      onClick={() => {
+                                        setSelectedProduct({ id: item.product_id, name: item.product?.name || '' });
+                                        setIsReviewOpen(true);
+                                      }}
+                                    >
+                                      {t.giveReview}
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                          <div className="pt-3 flex justify-between items-center">
+                            <div className="flex gap-2">
+                              {order.status === 'pending' && (
+                                <Button 
+                                  variant="outline" 
+                                  size="sm" 
+                                  className="h-8 text-xs text-red-600 border-red-100 hover:bg-red-50"
+                                  onClick={() => handleCancelOrder(order.id, order.items || [])}
+                                >
+                                  {t.cancelOrder}
+                                </Button>
+                              )}
+                              {order.status === 'delivered' && (
+                                <Button 
+                                  variant="outline" 
+                                  size="sm" 
+                                  className="h-8 text-xs text-orange-600 border-orange-100 hover:bg-orange-50"
+                                  onClick={() => handleReturnRequest(order.id)}
+                                >
+                                  {t.returnOrder}
+                                </Button>
+                              )}
+                            </div>
+                            <div className="text-right">
+                              <span className="text-xs text-gray-400">{t.totalPaid}:</span>
+                              <p className="font-bold text-green-700">৳{order.total_amount}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-20 bg-white rounded-xl border border-dashed border-gray-300 text-gray-500">
+                  {t.noOrders}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'wishlist' && (
+            <div className="space-y-6">
+              <h2 className="text-xl font-bold text-gray-800">{t.myWishlist}</h2>
+              {wishlist.length > 0 ? (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                  {wishlist.map((item) => (
+                    item.product && <ProductCard key={item.id} product={item.product} />
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-20 bg-white rounded-xl border border-dashed border-gray-300 text-gray-500">
+                  {t.noWishlist}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'address' && (
+            <div className="space-y-6">
+              <h2 className="text-xl font-bold text-gray-800">{t.addressBook}</h2>
+              <Card className="border-none shadow-sm">
+                <CardContent className="p-6">
+                  <form onSubmit={handleUpdateProfile} className="space-y-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="space-y-2">
+                        <Label htmlFor="phone">{t.phone}</Label>
+                        <div className="relative">
+                          <Phone className="absolute left-3 top-3 w-4 h-4 text-gray-400" />
+                          <Input 
+                            id="phone" 
+                            className="pl-10"
+                            value={newPhone} 
+                            onChange={e => setNewPhone(e.target.value)} 
+                            placeholder="01xxxxxxxxx"
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="address">{t.defaultAddress}</Label>
+                        <div className="relative">
+                          <MapPin className="absolute left-3 top-3 w-4 h-4 text-gray-400" />
+                          <Input 
+                            id="address" 
+                            className="pl-10"
+                            value={newAddress} 
+                            onChange={e => setNewAddress(e.target.value)} 
+                            placeholder={t.addressPlaceholder}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    <Button type="submit" className="bg-green-600 hover:bg-green-700" disabled={updatingProfile}>
+                      {updatingProfile ? t.updating : t.saveAddress}
+                    </Button>
+                  </form>
+                </CardContent>
+              </Card>
+
+              <div className="p-6 bg-amber-50 rounded-xl border border-amber-100 flex gap-4">
+                <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
+                  <Bell className="w-5 h-5 text-amber-600" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-amber-800 text-sm">{t.tips}</h4>
+                  <p className="text-xs text-amber-700 mt-1">{t.addressTip}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'settings' && (
+            <div className="space-y-6">
+              <h2 className="text-xl font-bold text-gray-800">{t.accountSettings}</h2>
+              
+              <Card className="border-none shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-base">{t.emailManagement}</CardTitle>
+                </CardHeader>
+                <CardContent className="p-6 space-y-6">
+                  <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center border border-gray-100">
+                        <Mail className="w-5 h-5 text-gray-400" />
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-400">{t.currentEmail}</p>
+                        <p className="font-medium text-gray-700">{user?.email}</p>
+                      </div>
+                    </div>
+                    <Badge className="bg-green-100 text-green-700">{t.verified}</Badge>
+                  </div>
+
+                  <form onSubmit={handleUpdateEmail} className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="newEmail">{t.addNewEmail}</Label>
+                      <Input 
+                        id="newEmail" 
+                        type="email"
+                        value={newEmail} 
+                        onChange={e => setNewEmail(e.target.value)} 
+                        placeholder="example@mail.com"
+                      />
+                    </div>
+                    <Button type="submit" variant="outline" className="border-green-600 text-green-600 hover:bg-green-50" disabled={updatingEmail}>
+                      {updatingEmail ? t.sendingRequest : t.changeEmail}
+                    </Button>
+                  </form>
+                </CardContent>
+              </Card>
+
+              <Card className="border-none shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-base">{t.security}</CardTitle>
+                </CardHeader>
+                <CardContent className="p-6">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center">
+                        <ShieldCheck className="w-5 h-5 text-blue-600" />
+                      </div>
+                      <div>
+                        <h4 className="font-medium text-sm">{t.twoFactor}</h4>
+                        <p className="text-xs text-gray-400">{t.enhanceSecurity}</p>
+                      </div>
+                    </div>
+                    <Button variant="ghost" size="sm" className="text-blue-600">{t.enable}</Button>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Dialogs */}
+      <Dialog open={isReviewOpen} onOpenChange={setIsReviewOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t.giveReview}: {selectedProduct?.name}</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSubmitReview} className="space-y-4">
+            <div className="space-y-2">
+              <Label>{t.rating}</Label>
+              <div className="flex gap-2">
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <button
+                    key={star}
+                    type="button"
+                    onClick={() => setRating(star)}
+                    className="focus:outline-none transition-transform hover:scale-110"
+                  >
+                    <Star 
+                      className={`w-8 h-8 ${star <= rating ? 'text-amber-500 fill-amber-500' : 'text-gray-200'}`} 
+                    />
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="comment">{t.yourOpinion}</Label>
+              <Input 
+                id="comment"
+                required
+                placeholder={t.reviewPlaceholder}
+                value={comment}
+                onChange={(e) => setComment(e.target.value)}
+              />
+            </div>
+            <Button type="submit" className="w-full bg-green-600 hover:bg-green-700" disabled={submitting}>
+              {submitting ? t.submitting : t.submitReview}
+            </Button>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isTrackingOpen} onOpenChange={setIsTrackingOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Truck className="w-5 h-5 text-green-600" /> {t.orderTracking}
+            </DialogTitle>
+          </DialogHeader>
+          
+          {trackingOrder && (
+            <div className="py-6 px-2 max-h-[70vh] overflow-y-auto custom-scrollbar">
+              <div className="mb-8 bg-green-50 p-4 rounded-xl border border-green-100">
+                <p className="text-xs text-green-600 font-medium mb-1">অর্ডার আইডি</p>
+                <p className="font-bold text-green-800">#{trackingOrder.id.slice(0, 12)}</p>
+                <div className="mt-3 flex items-center gap-2 text-xs text-green-700">
+                  <MapPin className="w-3 h-3" /> {trackingOrder.address}
+                </div>
+              </div>
+
+              <div className="relative space-y-6">
+                <div className="absolute left-5 top-2 bottom-2 w-0.5 bg-gray-100" />
+                {getTrackingSteps(trackingOrder.status).map((step, index, array) => (
+                  <div key={step.id} className="relative flex items-start gap-4 group">
+                    <div className={`relative z-10 w-10 h-10 rounded-full flex items-center justify-center border-2 transition-all duration-500 ${
+                      step.active 
+                        ? 'bg-amber-500 border-amber-100 text-white shadow-md shadow-amber-200' 
+                        : 'bg-white border-gray-50 text-gray-300'
+                    }`}>
+                      {step.icon}
+                    </div>
+                    <div className="flex-1 pt-1.5">
+                      <p className={`text-sm font-bold transition-colors ${step.active ? 'text-amber-600' : 'text-gray-400'}`}>
+                        {step.label}
+                      </p>
+                      {step.active && (
+                        <p className="text-[10px] text-gray-500 mt-0.5 flex items-center gap-1">
+                          <Clock className="w-3 h-3" /> {index === 0 ? new Date(trackingOrder.created_at).toLocaleDateString('bn-BD') : 'প্রক্রিয়াধীন...'}
+                        </p>
+                      )}
+                    </div>
+                    {index < array.length - 1 && step.active && array[index+1].active && (
+                      <div className="absolute left-5 top-10 h-6 w-0.5 bg-amber-500 z-0" />
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
